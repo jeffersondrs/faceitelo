@@ -42,83 +42,30 @@ app.get("/faceit/:nick", async (req: Request, res: Response) => {
   const game = (req.query.game as string)?.toLowerCase() || "cs2";
   const fmt = (req.query.format as string)?.toLowerCase() || "json";
 
-  if (!FACEIT_KEY) {
-    if (fmt === "text") {
-      res.setHeader("Content-Type", "text/plain; charset=utf-8");
-      return res.status(200).send("FACEIT_KEY não configurada");
-    }
-    return res.status(500).json({ error: "FACEIT_KEY não configurada" });
-  }
-
   const cacheKey = `faceit:${nick}:${game}`;
   const cached = getCache(cacheKey);
+
   if (cached) {
     if (fmt === "text") {
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
-      return res.status(200).send(cached.text);
+      res.status(200).send(cached.text);
+    } else {
+      res.json(cached.json);
     }
-    return res.json(cached.json);
+
+    (async () => {
+      try {
+        await atualizarCache(nick, game);
+      } catch {}
+    })();
+
+    return;
   }
 
   try {
-    const apiUrl = "https://open.faceit.com/data/v4/players";
-    const response = await axios.get(apiUrl, {
-      params: { nickname: nick, game },
-      headers: { Authorization: `Bearer ${FACEIT_KEY}` },
-      timeout: 1500,
-    });
-
-    const data = response.data;
-    if (DEBUG_FACEIT) console.log(JSON.stringify(data, null, 2));
-
-    let gamesArray: GameData[] = [];
-    if (Array.isArray(data.games)) {
-      gamesArray = data.games;
-    } else if (data.games && typeof data.games === "object") {
-      gamesArray = Object.values(data.games);
-    } else if (data.game && typeof data.game === "object") {
-      gamesArray = [data.game];
-    }
-
-    const gameLower = game.toLowerCase();
-    const gameObj = gamesArray.find((g) => {
-      if (!g) return false;
-      const name = (g.name || g.slug || "").toLowerCase();
-      return (
-        name.includes(gameLower) ||
-        (g.game_id && g.game_id.toLowerCase().includes(gameLower))
-      );
-    });
-
-    const level =
-      (gameObj?.skill_level ??
-        data.skill_level ??
-        data.games?.[gameLower]?.skill_level) ||
-      null;
-
-    const elo =
-      (gameObj?.faceit_elo ??
-        data.faceit_elo ??
-        data.games?.[gameLower]?.faceit_elo) ||
-      null;
-
-    const result = {
-      nickname: data.nickname || nick,
-      player_id: data.player_id,
-      game,
-      level: level ? String(level) : null,
-      elo: elo ?? null,
-      retrieved_at: new Date().toISOString(),
-    };
-
-    const text =
-      result.elo && result.level
-        ? `${result.nickname} — ELO: ${result.elo} | Level: ${result.level}`
-        : result.level
-        ? `${result.nickname} — Level: ${result.level} (ELO não disponível)`
-        : `Perfil ${nick} não encontrado ou sem dados para ${game}.`;
-
-    setCache(cacheKey, { json: result, text }, 30_000);
+    const data = await atualizarCache(nick, game);
+    const result = data.json;
+    const text = data.text;
 
     if (fmt === "text") {
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -126,31 +73,57 @@ app.get("/faceit/:nick", async (req: Request, res: Response) => {
     }
     return res.json(result);
   } catch (err: any) {
-    console.error(
-      "FACEIT fetch error:",
-      err.response?.status || err.code || err.message
-    );
-
-    const msg =
-      err.response?.status === 404
-        ? "Player não encontrado"
-        : err.response?.status === 401
-        ? "API key inválida"
-        : err.response?.status === 429
-        ? "Rate limit da FACEIT (429)"
-        : err.code === "ECONNABORTED"
-        ? "Timeout ao consultar FACEIT"
-        : "Erro ao consultar FACEIT";
-
     if (fmt === "text") {
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
-
-      return res.status(200).send(`Erro ao buscar ELO — ${msg}`);
+      return res
+        .status(200)
+        .send(`Erro ou timeout ao buscar ELO para ${nick}.`);
     }
-
-    return res.status(500).json({ error: msg });
+    return res.status(500).json({ error: "Erro ao buscar ELO" });
   }
 });
+
+async function atualizarCache(nick: string, game: string) {
+  const apiUrl = "https://open.faceit.com/data/v4/players";
+  const response = await axios.get(apiUrl, {
+    params: { nickname: nick, game },
+    headers: { Authorization: `Bearer ${FACEIT_KEY}` },
+    timeout: 1500,
+  });
+
+  const data = response.data;
+  const gameLower = game.toLowerCase();
+  const g = data.games?.[gameLower];
+
+  const elo = g?.faceit_elo ?? data.faceit_elo ?? null;
+  const level = g?.skill_level ?? data.skill_level ?? null;
+
+  const result = {
+    nickname: data.nickname || nick,
+    game,
+    level: level ? String(level) : null,
+    elo: elo ?? null,
+    retrieved_at: new Date().toISOString(),
+  };
+
+  const text =
+    result.elo && result.level
+      ? `${result.nickname} — ELO: ${result.elo} | Level: ${result.level}`
+      : result.level
+      ? `${result.nickname} — Level: ${result.level} (ELO não disponível)`
+      : `Perfil ${nick} não encontrado ou sem dados para ${game}.`;
+
+  setCache(`faceit:${nick}:${game}`, { json: result, text }, 60_000);
+  return { json: result, text };
+}
+
+app.get("/elo/:nick", (req, res) => {
+  const nick = req.params.nick;
+  const cached = getCache(`faceit:${nick}:cs2`);
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.status(200).send(cached ? cached.text : "Carregando dados...");
+});
+
 
 app.get("/_botrix-test", (req: Request, res: Response) => {
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
