@@ -23,7 +23,6 @@ type CacheEntry = {
   expire: number;
 };
 
-// Cache simples em memória
 const cache = new Map<string, CacheEntry>();
 function setCache(key: string, value: any, ttl = 30_000) {
   cache.set(key, { value, expire: Date.now() + ttl });
@@ -44,15 +43,21 @@ app.get("/faceit/:nick", async (req: Request, res: Response) => {
   const fmt = (req.query.format as string)?.toLowerCase() || "json";
 
   if (!FACEIT_KEY) {
+    if (fmt === "text") {
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      return res.status(200).send("FACEIT_KEY não configurada");
+    }
     return res.status(500).json({ error: "FACEIT_KEY não configurada" });
   }
 
   const cacheKey = `faceit:${nick}:${game}`;
   const cached = getCache(cacheKey);
   if (cached) {
-    return fmt === "text"
-      ? res.type("text").send(cached.text)
-      : res.json(cached.json);
+    if (fmt === "text") {
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      return res.status(200).send(cached.text);
+    }
+    return res.json(cached.json);
   }
 
   try {
@@ -60,13 +65,12 @@ app.get("/faceit/:nick", async (req: Request, res: Response) => {
     const response = await axios.get(apiUrl, {
       params: { nickname: nick, game },
       headers: { Authorization: `Bearer ${FACEIT_KEY}` },
-      timeout: 8000,
+      timeout: 1500,
     });
 
     const data = response.data;
     if (DEBUG_FACEIT) console.log(JSON.stringify(data, null, 2));
 
-    // Normaliza formato de games (array ou objeto)
     let gamesArray: GameData[] = [];
     if (Array.isArray(data.games)) {
       gamesArray = data.games;
@@ -76,7 +80,6 @@ app.get("/faceit/:nick", async (req: Request, res: Response) => {
       gamesArray = [data.game];
     }
 
-    // Procura o jogo correspondente
     const gameLower = game.toLowerCase();
     const gameObj = gamesArray.find((g) => {
       if (!g) return false;
@@ -115,11 +118,19 @@ app.get("/faceit/:nick", async (req: Request, res: Response) => {
         ? `${result.nickname} — Level: ${result.level} (ELO não disponível)`
         : `Perfil ${nick} não encontrado ou sem dados para ${game}.`;
 
-    setCache(cacheKey, { json: result, text });
+    setCache(cacheKey, { json: result, text }, 30_000);
 
-    return fmt === "text" ? res.type("text").send(text) : res.json(result);
+    if (fmt === "text") {
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      return res.status(200).send(text);
+    }
+    return res.json(result);
   } catch (err: any) {
-    console.error("FACEIT fetch error", err.response?.data || err.message);
+    console.error(
+      "FACEIT fetch error:",
+      err.response?.status || err.code || err.message
+    );
+
     const msg =
       err.response?.status === 404
         ? "Player não encontrado"
@@ -127,9 +138,23 @@ app.get("/faceit/:nick", async (req: Request, res: Response) => {
         ? "API key inválida"
         : err.response?.status === 429
         ? "Rate limit da FACEIT (429)"
+        : err.code === "ECONNABORTED"
+        ? "Timeout ao consultar FACEIT"
         : "Erro ao consultar FACEIT";
+
+    if (fmt === "text") {
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+
+      return res.status(200).send(`Erro ao buscar ELO — ${msg}`);
+    }
+
     return res.status(500).json({ error: msg });
   }
+});
+
+app.get("/_botrix-test", (req: Request, res: Response) => {
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.status(200).send("ok");
 });
 
 app.listen(PORT, () => {
